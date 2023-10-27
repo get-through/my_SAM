@@ -15,6 +15,7 @@ import shutil
 from functools import partial
 from segment_anything.utils.transforms import ResizeLongestSide
 from torchvision.transforms import Resize
+from torch.utils.tensorboard import SummaryWriter
 
 from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
 
@@ -83,8 +84,6 @@ def get_args_parser():
     parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', type=str,
                         help='dataset path')
 
-    parser.add_argument('--output_dir', default='./output_dir',
-                        help='path where to save, empty for no saving')
     parser.add_argument('--log_dir', default='./output_dir',
                         help='path where to tensorboard log')
     parser.add_argument('--device', default='cuda',
@@ -103,8 +102,8 @@ def get_args_parser():
     return parser
 
 def save_checkpoint(state, is_best, checkpoint):
-    filepath_last = os.path.join(checkpoint, "last.pth.tar")
-    filepath_best = os.path.join(checkpoint, "best.pth.tar")
+    filepath_last = os.path.join(checkpoint, "last.pth")
+    filepath_best = os.path.join(checkpoint, "best.pth")
     if not os.path.exists(checkpoint):
         print("Checkpoint Directory does not exist! Masking directory {}".format(checkpoint))
         os.mkdir(checkpoint)
@@ -121,6 +120,17 @@ def main(args):
     print("{}".format(args).replace(', ', ',\n'))
 
     device = torch.device(args.device)
+
+    os.makedirs(args.log_dir, exist_ok=True)
+
+    setup_logger(logger_name="train", root=args.snapshot_path, screen=True, tofile=True)
+    logger = logging.getLogger(f"train")
+    logger.info(str(args))
+    log_writer = SummaryWriter(log_dir=args.log_dir)
+
+    sam, msg = sam_model_registry[args.model_type](checkpoint=args.checkpoint)
+    logger.info("checkpoint load msg:{}".format(msg))
+    sam.to(device)
 
     # fix the seed for reproducibility
     seed = args.seed
@@ -196,16 +206,13 @@ def main(args):
     k=0
     train_files = dict()
     val_files = dict()
-    # for i in range(len(data_dicts)):
-    #     if i not in index:
-    #         train_files[j] = data_dicts[i]
-    #         j += 1
-    #     else:
-    #         val_files[k] = data_dicts[i]
-    #         k += 1
-    
-    train_files[0] = data_dicts[0]
-    val_files[0] = data_dicts[0]
+    for i in range(len(data_dicts)):
+        if i not in index:
+            train_files[j] = data_dicts[i]
+            j += 1
+        else:
+            val_files[k] = data_dicts[i]
+            k += 1
 
     set_determinism(seed=0)
     train_ds = CacheDataset(data=train_files, transform=train_transforms, cache_rate=1.0, num_workers=4)
@@ -214,17 +221,7 @@ def main(args):
     # print(first(train_ds))
     # print(first(train_ds)["image"].shape, first(train_ds)["image"].dtype)
 
-    os.makedirs(args.log_dir, exist_ok=True)
-
-    setup_logger(logger_name="train", root=args.snapshot_path, screen=True, tofile=True)
-    logger = logging.getLogger(f"train")
-    logger.info(str(args))
-
     eff_batch_size = args.batch_size * args.accum_iter
-
-    for sample in train_ds:
-        print(sample)
-        break
 
     filtered_train_ds = [sample for sample in train_ds if sample["label"].sum()>0]
     filtered_val_ds = [sample for sample in val_ds if sample["label"].sum()>0]
@@ -235,13 +232,7 @@ def main(args):
     data_loader_train = ThreadDataLoader(filtered_train_ds, num_workers=0, batch_size=eff_batch_size, shuffle=True, drop_last=True)
     data_loader_val = ThreadDataLoader(filtered_val_ds, num_workers=0, batch_size=eff_batch_size, shuffle=True, drop_last=True)
 
-    check_data = first(data_loader_train)
-    print(check_data.keys())
-
     # define the model
-    sam, msg = sam_model_registry[args.model_type](checkpoint=args.checkpoint)
-    logger.info("checkpoint load msg:{}".format(msg))
-    sam.to(device)
 
     opt = AdamW([i for i in sam.parameters() if i.requires_grad==True], lr=args.lr, weight_decay=0)
     scheduler = torch.optim.lr_scheduler.LinearLR(opt, start_factor=1.0, end_factor=0.01, total_iters=500)
@@ -257,16 +248,21 @@ def main(args):
             resizer = Resize(spatial_size=224, mode=("bilinear"), size_mode="longest")
             samples = [resizer(img) for img in data["image"]]
             samples = torch.stack(samples)
-            samples = samples.repeat(1,3,1,1,1).to(device)
+            img = samples.repeat(1,3,1,1,1).to(device)
             segs = [resizer(img) for img in data["label"]]
             seg = torch.stack(segs)
             # print('seg:', seg[seg!=0])
 
             input_point = []
             label_point = torch.nonzero(seg[0,0,:,:,:]==1)
-            # print(label_point)
-            input_point = label_point[len(label_point)//2].unsqueeze(0)
-            # print(input_point)
+            print("label_point:",label_point)
+            if(label_point.shape[0]==0):
+                label_point = torch.where(seg==torch.max(seg))
+                ind = label_point[0].shape[0]//2
+                input_point = torch.tensor([label_point[2][ind],label_point[3][ind],label_point[4][ind]]).unsqueeze(0).to(device)
+            else:
+                input_point = label_point[len(label_point)//2].unsqueeze(0)
+            print("input_point:",input_point)
             input_label = np.array([1])
             transform = ResizeLongestSide(sam.image_encoder.img_size)
             coords_torch = transform.apply_coords(input_point, samples.shape[-3:])
@@ -276,37 +272,51 @@ def main(args):
             coords_torch, labels_torch = coords_torch[None, :, :], labels_torch[None, :]
             points = (coords_torch, labels_torch)
 
-            input_batch = dict()
-            input_batch["image"] = samples[0]
-            input_batch["original_size"] = samples.shape[2:]
-            input_batch["point_coords"] = coords_torch
-            input_batch["point_labels"] = labels_torch
-            input_batch["boxes"] = None
-            input_batch["mask_inputs"] = None
-            batched_input = list()
-            batched_input.append(input_batch)
-            out = sam(batched_input,False)
+            # input_batch = dict()
+            # input_batch["image"] = samples[0]
+            # input_batch["original_size"] = samples.shape[2:]
+            # input_batch["point_coords"] = coords_torch
+            # input_batch["point_labels"] = labels_torch
+            # input_batch["boxes"] = None
+            # input_batch["mask_inputs"] = None
+            # batched_input = list()
+            # batched_input.append(input_batch)
+            # out = sam(batched_input,False)
+            sparse_embeddings, dense_embeddings = sam.prompt_encoder(
+                    points=points,
+                    boxes=None,
+                    masks=None,
+            )
+            low_res_masks, iou_predictions = sam.mask_decoder(
+                image_embeddings=sam.image_encoder(img),
+                image_pe=sam.prompt_encoder.get_dense_pe(),
+                sparse_prompt_embeddings=sparse_embeddings,
+                dense_prompt_embeddings=dense_embeddings,
+                multimask_output=False,
+            )
+            masks = sam.postprocess_masks(low_res_masks, img.shape[-3:], img.shape[-3:])
+            masks[masks<0] = 0
 
             seg = seg.to(device)
-            masks = out[0]["masks"]
+            assert torch.min(seg) >= 0
             print("mask and seg shape:", masks.shape, seg.shape)
             loss = loss_cal(masks.to(dtype=torch.float), seg)
             print("loss:",loss)
             loss_summary.append(loss.detach().cpu().numpy())
             opt.zero_grad()
-            # loss.requires_grad_()
-            loss = loss.to(dtype=torch.float)
             print(loss.requires_grad, loss.dtype)
-            print(hasattr(loss, 'grad_fn'))
+            print(loss.grad_fn)
             loss.backward()
             logger.info(
-                'epoch: {}/{}, iter: {}/{}'.format(epoch_num, args.max_epoch, idx, len(data_loader_train)) + ", lr:{}".format(opt.param_groups[0]['lr']) + ", loss:" + str(
+                'epoch: {}/{}, iter: {}/{}'.format(epoch_num+1, args.max_epoch, idx+1, len(data_loader_train)) + ", lr:{}".format(opt.param_groups[0]['lr']) + ", loss:" + str(
                     loss_summary[-1].flatten()[0]))
             torch.nn.utils.clip_grad_norm_(sam.parameters(), 1.0)
             opt.step()
         scheduler.step()
 
         logger.info("- Train metrics: " + str(np.mean(loss_summary)))
+        log_writer.add_scalar('train_loss', np.mean(loss_summary), epoch_num)
+        log_writer.add_scalar('lr', opt.param_groups[0]['lr'], epoch_num)
 
         sam.eval()
         with torch.no_grad():
@@ -344,16 +354,20 @@ def main(args):
                     multimask_output=False,
                 )
                 masks = sam.postprocess_masks(low_res_masks, img.shape[-3:], img.shape[-3:])
-                masks = masks > 0
+                masks[masks>0] = 1
+                masks[masks<0] = 0
                 
                 seg = seg.to(device)
-                masks = masks.to(device, dtype=torch.float)
+                seg[seg>0] = 1
+                seg[seg<0] = 0
+                masks = masks.to(device)
                 loss = dice_loss(masks, seg)
                 loss_summary.append(loss.detach().cpu().numpy())
                 logger.info(
-                    'epoch: {}/{}, iter: {}/{}'.format(epoch_num, args.max_epoch, idx, len(data_loader_val)) + ": loss:" + str(
+                    'epoch: {}/{}, iter: {}/{}'.format(epoch_num+1, args.max_epoch, idx+1, len(data_loader_val)) + ": loss:" + str(
                         loss_summary[-1].flatten()[0]))
         logger.info("- Val metrics: " + str(np.mean(loss_summary)))
+        log_writer.add_scalar('val_loss', np.mean(loss_summary), epoch_num)
 
         is_best = False
         if np.mean(loss_summary) < best_loss:
@@ -367,6 +381,9 @@ def main(args):
                         is_best=is_best,
                         checkpoint=args.snapshot_path)
         logger.info("- Val metrics best: " + str(best_loss))
+        log_writer.add_scalar('val_best', best_loss, epoch_num)
+
+
 
 def setup_logger(logger_name, root, level=logging.INFO, screen=False, tofile=False):
     """set up logger"""

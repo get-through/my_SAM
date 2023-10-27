@@ -28,7 +28,6 @@ class ImageEncoderViT(nn.Module):
         embed_dim=embed_dim)
         self.embed_dim = embed_dim
         self.patch_size = patch_size
-        self.lin = nn.Linear(patch_size*3, 1)
         num_patches = (img_size // patch_size) **3
 
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim), requires_grad=False)  # fixed sin-cos embedding
@@ -64,22 +63,8 @@ class ImageEncoderViT(nn.Module):
     def forward(self, x):
         B, C, H, W, Z = x.shape
         print("x:",x.device)
-        xy = torch.zeros(B,self.embed_dim,H // self.patch_size,W // self.patch_size,Z).to(x.device)
-        xz = torch.zeros(B,self.embed_dim,H // self.patch_size,W,Z // self.patch_size).to(x.device)
-        yz = torch.zeros(B,self.embed_dim,H,W // self.patch_size,Z // self.patch_size).to(x.device)
-        for j in range(Z):
-            # print(xy[:,:,:,:,j].shape, self.patch_embed(x[:,:,:,:,j]).shape)
-            xy[:,:,:,:,j] = self.patch_embed(x[:,:,:,:,j])
-            xz[:,:,:,j,:] = self.patch_embed(x[:,:,:,j,:])
-            yz[:,:,j,:,:] = self.patch_embed(x[:,:,j,:,:])
-        xy = xy.reshape(B,self.embed_dim,H // self.patch_size,W // self.patch_size,Z // self.patch_size,self.patch_size)
-        xz = xz.permute(0,1,2,4,3).reshape(B,self.embed_dim,H // self.patch_size,Z // self.patch_size,W // self.patch_size,self.patch_size).permute(0,1,2,4,3,5)
-        yz = yz.permute(0,1,3,4,2).reshape(B,self.embed_dim,W // self.patch_size,Z // self.patch_size,H // self.patch_size,self.patch_size).permute(0,1,4,2,3,5)
-
-        x = torch.cat((xy,xz,yz),dim=-1).to(x.device)
-        x = self.lin(x).squeeze(-1)
-        x = x.flatten(2).transpose(1, 2)
-        print("patch embed x:", x.shape, x.dtype)
+        
+        x = self.patch_embed(x)
 
         if self.pos_embed is not None:
             
@@ -122,9 +107,27 @@ class PatchEmbed(nn.Module):
         self.proj = nn.Conv2d(
             in_chans, embed_dim, kernel_size=kernel_size, stride=stride, padding=padding
         )
+        self.embed_dim = embed_dim
+        self.patch_size = kernel_size
+        self.lin = nn.Linear(kernel_size*3, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.proj(x)
-        # B C H W -> B H W C
-        # x = x.permute(0, 2, 3, 1)
+        B,C,H,W,Z = x.shape
+
+        xy = torch.zeros(B,self.embed_dim,H // self.patch_size,W // self.patch_size,Z).to(x.device)
+        xz = torch.zeros(B,self.embed_dim,H // self.patch_size,W,Z // self.patch_size).to(x.device)
+        yz = torch.zeros(B,self.embed_dim,H,W // self.patch_size,Z // self.patch_size).to(x.device)
+        for j in range(Z):
+            # print(xy[:,:,:,:,j].shape, self.patch_embed(x[:,:,:,:,j]).shape)
+            xy[:,:,:,:,j] = self.proj(x[:,:,:,:,j])
+            xz[:,:,:,j,:] = self.proj(x[:,:,:,j,:])
+            yz[:,:,j,:,:] = self.proj(x[:,:,j,:,:])
+        xy = xy.reshape(B,self.embed_dim,H // self.patch_size,W // self.patch_size,Z // self.patch_size,self.patch_size)
+        xz = xz.permute(0,1,2,4,3).reshape(B,self.embed_dim,H // self.patch_size,Z // self.patch_size,W // self.patch_size,self.patch_size).permute(0,1,2,4,3,5)
+        yz = yz.permute(0,1,3,4,2).reshape(B,self.embed_dim,W // self.patch_size,Z // self.patch_size,H // self.patch_size,self.patch_size).permute(0,1,4,2,3,5)
+
+        x = torch.cat((xy,xz,yz),dim=-1).to(x.device)
+        x = self.lin(x).squeeze(-1)
+        x = x.flatten(2).transpose(1, 2)
+        print("patch embed x:", x.shape, x.dtype, "x grad_fn:", x.grad_fn)
         return x

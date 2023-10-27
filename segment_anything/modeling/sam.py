@@ -93,14 +93,15 @@ class Sam(nn.Module):
                 shape BxCxHxW, where H=W=256. Can be passed as mask input
                 to subsequent iterations of prediction.
         """
-        print("batched_input:", batched_input)
+        # print("batched_input:", batched_input)
         # print(first(batched_input))
         input_images = torch.stack([x["image"] for x in batched_input], dim=0)
         image_embeddings = self.image_encoder(input_images)
-        print("image embedding shape:",image_embeddings.shape)
+        # print("image embedding shape:",image_embeddings.shape, image_embeddings.grad_fn)
 
         outputs = []
         for image_record, curr_embedding in zip(batched_input, image_embeddings):
+            print(curr_embedding.grad_fn)
             if "point_coords" in image_record:
                 points = (image_record["point_coords"], image_record["point_labels"])
             else:
@@ -122,7 +123,10 @@ class Sam(nn.Module):
                 input_size=image_record["image"].shape[-3:],
                 original_size=image_record["original_size"],
             )
-            masks = masks > self.mask_threshold
+            # using masks = masks > self.mask_threshold makes masks lost grad_fn
+            masks[masks < self.mask_threshold] = 0
+            masks[masks > self.mask_threshold] = 1
+
             outputs.append(
                 {
                     "masks": masks,
@@ -153,7 +157,7 @@ class Sam(nn.Module):
           (torch.Tensor): Batched masks in BxCxHxW format, where (H, W)
             is given by original_size.
         """
-        print("original size:", original_size, "input size:", input_size)
+        # print("original size:", original_size, "input size:", input_size)
         masks = F.interpolate(
             masks,
             (self.image_encoder.img_size, self.image_encoder.img_size, self.image_encoder.img_size),

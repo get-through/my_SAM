@@ -112,17 +112,28 @@ def _build_sam(
     if checkpoint is not None:
         with open(checkpoint, "rb") as f:
             state_dict = torch.load(f)
+        
+        interpolate_dict = torch.load("../../../data/xinglujing/checkpoint/interpolate_freeze/checkpoint-400.pth")["model"]
+
+        # print(interpolate_dict.keys())
 
         freeze_dict = dict()
         for name, param in sam.named_parameters():
-            if name in state_dict and param.shape == state_dict[name].shape:
-                freeze_dict[name] = state_dict[name]
+            if "image_encoder" in name and "neck" not in name and param.shape == interpolate_dict["module."+name.replace("image_encoder.","")].shape:
+                # print("module."+name.replace("image_encoder.",""))
+                freeze_dict[name] = interpolate_dict["module."+name.replace("image_encoder.","")]
                 param.requires_grad = False
-            else:
-                print("incompatible:",name)
-                print(param.requires_grad)
+            elif name == "image_encoder.pos_embed":
+                assert param.shape == interpolate_dict["module."+name.replace("image_encoder.","")][:,1:,:].shape
+                freeze_dict[name] = interpolate_dict["module."+name.replace("image_encoder.","")][:,1:,:]
+                param.requires_grad = False
+            elif name in state_dict and param.shape == state_dict[name].shape:
+                freeze_dict[name] = state_dict[name]
+                # param.requires_grad = False    
+            # else:
+                # print("incompatible:",name)
+                # print(param.requires_grad)
 
-        
         msg = sam.load_state_dict(freeze_dict,strict=False)
-        print(msg)
+        # print(msg)
     return sam, msg
