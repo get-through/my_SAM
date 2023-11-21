@@ -77,14 +77,14 @@ def _build_sam(
             embed_dim=encoder_embed_dim,
             img_size=image_size,
             mlp_ratio=4,
-            # norm_layer=partial(torch.nn.LayerNorm, eps=1e-6),
+            norm_layer=partial(torch.nn.LayerNorm, eps=1e-6),
             num_heads=encoder_num_heads,
             patch_size=vit_patch_size,
-            # qkv_bias=True,
-            # use_rel_pos=True,
-            # global_attn_indexes=encoder_global_attn_indexes,
-            # window_size=14,
-            # out_chans=prompt_embed_dim,
+            qkv_bias=True,
+            use_rel_pos=True,
+            global_attn_indexes=encoder_global_attn_indexes,
+            window_size=14,
+            out_chans=prompt_embed_dim,
         ),
         prompt_encoder=PromptEncoder(
             embed_dim=prompt_embed_dim,
@@ -109,30 +109,27 @@ def _build_sam(
         pixel_std=[58.395, 57.12, 57.375],
     )
     sam.eval()
+    msg = None
     if checkpoint is not None:
         with open(checkpoint, "rb") as f:
             state_dict = torch.load(f)
         
-        interpolate_dict = torch.load("../../../data/xinglujing/checkpoint/interpolate_freeze/checkpoint-400.pth")["model"]
+        # interpolate_dict = torch.load("../../../data/xinglujing/checkpoint/interpolate_freeze/checkpoint-400.pth")["model"]
 
         # print(interpolate_dict.keys())
 
         freeze_dict = dict()
         for name, param in sam.named_parameters():
-            if "image_encoder" in name and "neck" not in name and param.shape == interpolate_dict["module."+name.replace("image_encoder.","")].shape:
-                # print("module."+name.replace("image_encoder.",""))
-                freeze_dict[name] = interpolate_dict["module."+name.replace("image_encoder.","")]
-                param.requires_grad = False
-            elif name == "image_encoder.pos_embed":
-                assert param.shape == interpolate_dict["module."+name.replace("image_encoder.","")][:,1:,:].shape
-                freeze_dict[name] = interpolate_dict["module."+name.replace("image_encoder.","")][:,1:,:]
-                param.requires_grad = False
-            elif name in state_dict and param.shape == state_dict[name].shape:
+            # if "image_encoder" in name and "module."+name.replace("image_encoder.","") in interpolate_dict.keys() and param.shape == interpolate_dict["module."+name.replace("image_encoder.","")].shape:
+            #     # print("module."+name.replace("image_encoder.",""))
+            #     freeze_dict[name] = interpolate_dict["module."+name.replace("image_encoder.","")]
+            #     # param.requires_grad = False
+            if name in state_dict and param.shape == state_dict[name].shape:
                 freeze_dict[name] = state_dict[name]
-                # param.requires_grad = False    
+                param.requires_grad = False    
             # else:
-                # print("incompatible:",name)
-                # print(param.requires_grad)
+            #     print("incompatible:",name)
+            #     print(param.requires_grad)
 
         msg = sam.load_state_dict(freeze_dict,strict=False)
         # print(msg)

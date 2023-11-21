@@ -86,7 +86,7 @@ class TwoWayTransformer(nn.Module):
         # Prepare queries
         queries = point_embedding
         keys = image_embedding
-
+        # print(queries,keys,point_embedding)
         # Apply transformer blocks and final layernorm
         for layer in self.layers:
             queries, keys = layer(

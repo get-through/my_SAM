@@ -64,7 +64,7 @@ class Sam(nn.Module):
           batched_input (list(dict)): A list over input images, each a
             dictionary with the following keys. A prompt key can be
             excluded if it is not present.
-              'image': The image as a torch tensor in 3xHxW format,
+              'image': The image as a torch tensor in 3xHxWxZ format,
                 already transformed for input to the model.
               'original_size': (tuple(int, int)) The original size of
                 the image before transformation, as (H, W).
@@ -95,7 +95,9 @@ class Sam(nn.Module):
         """
         # print("batched_input:", batched_input)
         # print(first(batched_input))
-        input_images = torch.stack([x["image"] for x in batched_input], dim=0)
+        print("batch image shape:",len(batched_input),batched_input[0]["image"].shape)
+        input_images = batched_input[0]["image"]
+        print("input shape:",input_images.shape)
         image_embeddings = self.image_encoder(input_images)
         # print("image embedding shape:",image_embeddings.shape, image_embeddings.grad_fn)
 
