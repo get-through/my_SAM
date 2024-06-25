@@ -16,7 +16,7 @@ from .prompt_encoder import PromptEncoder
 
 
 class Sam(nn.Module):
-    mask_threshold: float = 0.0
+    mask_threshold: float = 0.5
     image_format: str = "RGB"
 
     def __init__(
@@ -98,12 +98,13 @@ class Sam(nn.Module):
         print("batch image shape:",len(batched_input),batched_input[0]["image"].shape)
         input_images = batched_input[0]["image"]
         print("input shape:",input_images.shape)
-        image_embeddings = self.image_encoder(input_images)
+        # image_embeddings = self.image_encoder(input_images)
         # print("image embedding shape:",image_embeddings.shape, image_embeddings.grad_fn)
 
         outputs = []
-        for image_record, curr_embedding in zip(batched_input, image_embeddings):
-            print(curr_embedding.grad_fn)
+        for image_record in batched_input:
+            # print(curr_embedding.grad_fn)
+            image_embeddings = self.image_encoder(image_record["image"].unsqueeze(0))
             if "point_coords" in image_record:
                 points = (image_record["point_coords"], image_record["point_labels"])
             else:
@@ -113,9 +114,11 @@ class Sam(nn.Module):
                 boxes=image_record.get("boxes", None),
                 masks=image_record.get("mask_inputs", None),
             )
-            low_res_masks, iou_predictions = self.mask_decoder(
-                image_embeddings=curr_embedding.unsqueeze(0),
+            low_res_masks, low_res_organs, iou_predictions = self.mask_decoder(
+                image_record["image"][0,:,:,:].unsqueeze(0),
+                image_embeddings=image_embeddings,
                 image_pe=self.prompt_encoder.get_dense_pe(),
+                points = image_record["point_coords"],
                 sparse_prompt_embeddings=sparse_embeddings,
                 dense_prompt_embeddings=dense_embeddings,
                 multimask_output=multimask_output,

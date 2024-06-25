@@ -13,6 +13,7 @@ from segment_anything.utils.transforms import ResizeLongestSide
 from torchvision.transforms import Resize
 from torch.utils.tensorboard import SummaryWriter
 from monai.metrics import DiceMetric
+from torch.utils.data import Dataset
 
 from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
 
@@ -151,11 +152,11 @@ def main(args):
 
     sam, msg = sam_model_registry[args.model_type](checkpoint=args.checkpoint)
     logger.info("checkpoint load msg:{}".format(msg))
-    state_dict = torch.load("./log/best_pic7.pth")["dict"]
+    state_dict = torch.load("./all/best_all.pth")["dict"]
     msg = sam.load_state_dict(state_dict, strict=False)
     print(msg)
     sam.to(device)
-
+    # torch.nn.DataParallel(sam)
     # fix the seed for reproducibility
     seed = args.seed
     organ_id = args.organ_id
@@ -185,19 +186,16 @@ def main(args):
                 mode=("bilinear","nearest"),
             ),
             CropForegroundd(keys=["image","label"], source_key="image"),
-            # some label has one dim even <96
             AdaptiveRandCropByPosNegLabeld(
                 keys=['image', 'label'],
                 label_key='label',
                 desired_spatial_size=(224, 224, 224),
                 pos=2,
                 neg=1,
-                num_samples=1,
+                num_samples=3,
             ),
-            # memory not enough, first save as 96, when training/val, resize to 224, possible resolution loss
             Resized(keys=["image","label"], spatial_size=96, mode=("bilinear","nearest"), size_mode="longest"),
             SpatialPadd(keys=["image","label"], spatial_size=(96,96,96), method="end"),
-            # not working
             # RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=0),
             # RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=1),
             # RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=2),
@@ -224,8 +222,10 @@ def main(args):
                 mode=("bilinear","nearest"),
             ),
             CropForegroundd(keys=["image","label"], source_key="image"),
+            # Resized(keys=["image"], spatial_size=(224,224,64), mode=("bilinear")),
             Resized(keys=["image","label"], spatial_size=96, mode=("bilinear","nearest"), size_mode="longest"),
             SpatialPadd(keys=["image","label"], spatial_size=(96,96,96), method="end"),
+            # Resized(keys=["image"], spatial_size=(224,128,224), mode=("bilinear")),
             EnsureTyped(keys=["image","label"], device=device, track_meta=False),
         ]
     )
@@ -236,21 +236,41 @@ def main(args):
     val_images = sorted(glob.glob(os.path.join(args.data_path, "imagesVa", "*.nii.gz")))
     val_labels = sorted(glob.glob(os.path.join(args.data_path, "labelsVa", "*.nii.gz")))
     val_files = [{"image": image_name, "label": label_name} for image_name, label_name in zip(val_images, val_labels)]
+    # index = [2,12,32,42,52,62,72,82,92,102,112,122,132,142,152,162,172,182,192,202,212,222,232,242,252,262,272,282,292,302,312,322,332,342,352,362,372,382,392,402.412,422,432,442,452,462,472,482,492]
+    # j=0
+    # k=0
+    # train_files = dict()
+    # val_files = dict()
+    # for i in range(len(data_dicts)):
+    #     if i not in index:
+    #         train_files[j] = data_dicts[i]
+    #         j += 1
+    #     else:
+    #         val_files[k] = data_dicts[i]
+    #         k += 1
+
+    # train_files[0] = data_dicts[0]
+    # val_files[0] = data_dicts[1]
 
     set_determinism(seed=0)
+    # train_files = train_files[:6]
+    # val_files = val_files[:6]
+
     train_ds = CacheDataset(data=train_files, transform=train_transforms, cache_rate=1.0, num_workers=4)
+    flattend_train_ds = FlattenedDataset(train_ds,3)
+    assert len(flattend_train_ds) == 3*len(train_ds)
+    eff_batch_size = args.batch_size * args.accum_iter
+
+    filtered_train_ds = [sample for sample in flattend_train_ds if torch.where(sample["label"]==organ_id)[0].shape[0]>0]
+    print("train_ds from",len(flattend_train_ds),"to",len(filtered_train_ds))
+
     val_ds = CacheDataset(data=val_files, transform=val_transforms, cache_rate=1.0, num_workers=4)
 
     # print(first(train_ds))
     # print(first(train_ds)["image"].shape, first(train_ds)["image"].dtype)
-
-    eff_batch_size = args.batch_size * args.accum_iter
-
-    # only train on samples with the organ
-    filtered_train_ds = [sample for sample in train_ds if torch.where(sample[0]["label"]==organ_id)[0].shape[0]>0]
+    
     filtered_val_ds = [sample for sample in val_ds if torch.where(sample["label"]==organ_id)[0].shape[0]>0]
-
-    print("train_ds from",len(train_ds),"to",len(filtered_train_ds))
+    
     print("val_ds from",len(val_ds),"to",len(filtered_val_ds))
 
     data_loader_train = ThreadDataLoader(filtered_train_ds, num_workers=0, batch_size=eff_batch_size, shuffle=True, drop_last=True)
@@ -261,7 +281,7 @@ def main(args):
 
     # define the model
 
-    opt = AdamW([i for i in sam.parameters() if i.requires_grad==True], lr=args.lr, weight_decay=0)
+    opt = AdamW([i for i in sam.parameters() if i.requires_grad==True], lr=args.lr, weight_decay=0.0002)
     scheduler = torch.optim.lr_scheduler.LinearLR(opt, start_factor=1.0, end_factor=0.01, total_iters=500)
     
     dice_loss = DiceLoss(include_background=False, softmax=True, to_onehot_y=True, reduction="mean")
@@ -285,14 +305,17 @@ def main(args):
 
             samples = [resizer_image(img) for img in data["image"]]
             samples = torch.stack(samples)
+            assert samples.shape == (1,1,224,224,224)
             img = samples.repeat(1,3,1,1,1).to(device)
             # print("data shape:",img.shape)
             segs = [resizer_label(img) for img in data["label"]]
             seg = torch.stack(segs)
+            assert seg.shape == (1,1,224,224,224)
             # print('seg:', seg[seg!=0])
+            # seg[seg>0]=1
+            # batched_input = list()
 
             input_point = []
-
             label_point_pos = torch.nonzero(seg[0,0,:,:,:]==organ_id)
             print("label_point_length:",len(label_point_pos))
             # assert len(label_point_pos) >= args.num_points*5
@@ -313,30 +336,26 @@ def main(args):
                 input_point = torch.cat((input_point_pos,input_point_neg.to(device)),dim=1)
             else:
                 logger.info("has no organ label")
-                label_point = torch.where(seg[0,0,:,:,:]==0)
-                ind = torch.randperm(label_point_neg[0].shape[0])[:2*args.num_points]
+                label_point = torch.where(seg[0,0,:,:,:]!=organ_id)
+                ind = torch.randperm(label_point[0].shape[0])[:2*args.num_points]
                 input_point = torch.stack([torch.tensor([label_point[0][ind[i]],label_point[1][ind[i]],label_point[2][ind[i]]]) for i in range(args.num_points)]).unsqueeze(0)
 
                 labels_torch = torch.zeros(1,2*args.num_points)
 
             transform = ResizeLongestSide(sam.image_encoder.img_size)
             coords_torch = transform.apply_coords(input_point, samples.shape[-3:])
-            # coords_torch = torch.as_tensor(point_coords, dtype=torch.float, device=device)
-            # labels_torch = torch.as_tensor(input_label, dtype=torch.int, device=device)
-            # print("coords, labels:",coords_torch,labels_torch)
-            # coords_torch, labels_torch = coords_torch[None, :, :], labels_torch[None, :]
             points = (coords_torch, labels_torch)
             print("train coords, labels:",coords_torch.shape, labels_torch.shape)
 
-            # input_batch = dict()
-            # input_batch["image"] = samples[0]
-            # input_batch["original_size"] = samples.shape[2:]
-            # input_batch["point_coords"] = coords_torch
-            # input_batch["point_labels"] = labels_torch
-            # input_batch["boxes"] = None
-            # input_batch["mask_inputs"] = None
-            # batched_input = list()
-            # batched_input.append(input_batch)
+                # input_batch = dict()
+                # input_batch["image"] = img[i]
+                # input_batch["original_size"] = img.shape[2:]
+                # input_batch["point_coords"] = coords_torch
+                # input_batch["point_labels"] = labels_torch
+                # input_batch["boxes"] = None
+                # input_batch["mask_inputs"] = None
+                # batched_input.append(input_batch)
+
             # out = sam(batched_input,False)
             sparse_embeddings, dense_embeddings = sam.prompt_encoder(
                     points=points,
@@ -352,34 +371,36 @@ def main(args):
                 dense_prompt_embeddings=dense_embeddings,
                 multimask_output=False,
             )
-            # masks = sam.postprocess_masks(low_res_masks, img.shape[-3:], img.shape[-3:])
-            # organ = sam.postprocess_masks(low_res_organ, img.shape[-3:], img.shape[-3:])
+            masks = sam.postprocess_masks(masks, img.shape[-3:], img.shape[-3:])
+            organ = sam.postprocess_masks(organ, img.shape[-3:], img.shape[-3:])
 
             # seg[seg>0] = 1
-            # masks[masks<0] = 0
-            # masks[masks>0] = 1
+            # masks[masks<0.5] = 0
+            # masks[masks>0.5] = 1
             # masks = masks.clip(0,1)
-            assert organ.shape == (1,2,224,224,224)
+            # assert organ.shape == (1,2,224,224,224)
+            # masks = out["masks"]
             print("mask:",masks.shape)
 
             seg = seg.to(device)
 
             assert torch.min(seg) >= 0
-
-            seg[seg!=organ_id] = 0
-            seg[seg>0] = 1
             
             # seg[seg>times] = 0
-            diceloss = dice_loss(masks.clip(0,1), seg.clip(0,1))
             bce_loss = torch.nn.BCELoss()
+            # masks = torch.sigmoid(masks)
             bceloss = bce_loss(masks.clip(0,1),seg.clip(0,1))
-
+            # masks[masks>0]=1
+            # masks[masks<0]=0
+            diceloss = dice_loss(masks.clip(0,1), seg.clip(0,1))
+            seg[seg!=organ_id] = 0
+            seg[seg>0] = 1
             # diceloss_organ = dice_loss(organ,seg)
             # if(low):
             #     organ = torch.argmax(organ,dim=1)
             #     organ = organ.unsqueeze(0)
             diceceloss_organ = loss_cal(organ.float(),seg)
-            focalloss = focal_loss(organ,seg.clip(0,1))
+            # focalloss = focal_loss(organ,seg.clip(0,1))
             loss = weight_all * (diceloss + weight_bce * bceloss) + weight_organ * diceceloss_organ 
 
             # print("loss:",loss)
@@ -390,7 +411,7 @@ def main(args):
             loss.backward()
             logger.info(
                 'epoch: {}/{}, iter: {}/{}'.format(epoch_num+1, args.max_epoch, idx+1, len(data_loader_train)) + ", lr:{}".format(opt.param_groups[0]['lr']) + ", loss:" + str(
-                    loss_summary[-1].flatten()[0]) + ", dice_loss:" + str(diceloss.detach().cpu().numpy()) + ", bce_loss:" + str(bceloss.detach().cpu().numpy()) + ", organ_loss:" + str(diceceloss_organ.detach().cpu().numpy()) + ", focal_loss:" + str(focalloss.detach().cpu().numpy()))
+                    loss_summary[-1].flatten()[0]) + ", dice_loss:" + str(diceloss.detach().cpu().numpy()) + ", bce_loss:" + str(bceloss.detach().cpu().numpy()) + ", organ_loss:" + str(diceceloss_organ.detach().cpu().numpy())) #+ ", focal_loss:" + str(focalloss.detach().cpu().numpy()))
             torch.nn.utils.clip_grad_norm_(sam.parameters(), 1.0)
             opt.step()
         scheduler.step()
@@ -398,6 +419,22 @@ def main(args):
         logger.info("- Train metrics: " + str(np.mean(loss_summary)))
         log_writer.add_scalar('train_loss', np.mean(loss_summary), epoch_num)
         log_writer.add_scalar('lr', opt.param_groups[0]['lr'], epoch_num)
+
+        # if np.mean(loss_summary)<0.12:
+        #     low = 1
+        # if 0.3<np.mean(loss_summary)<0.4:
+        #     weight_d = 0.6
+        #     weight_bce = 0.4
+        # elif np.mean(loss_summary) < 0.3:
+        #     weight_d = 1
+        #     weight_bce = 0
+        #     if(times>1):
+        #         times-=1
+        #     else:
+        #         weight_d = 0.4
+        #         weight_bce = 0.3
+        #         weight_focal = 0.3
+        #     logger.info("times initially 15, down to {}".format(times))
 
         sam.eval()
         with torch.no_grad():
@@ -408,7 +445,7 @@ def main(args):
                 img = samples.repeat(1,3,1,1,1).to(device)
                 segs = [resizer_label(img) for img in data["label"]]
                 seg = torch.stack(segs)
-                # seg[seg>times] = 0
+                # seg[seg>0] = 1
                 # print('seg: ', seg.sum())
                 input_point = []
                 label_point = torch.nonzero(seg[0,0,:,:,:]==organ_id)
@@ -459,6 +496,8 @@ def main(args):
                 # masks = masks.to(device)
                 organ = torch.argmax(organ,dim=1)
                 organ = organ.unsqueeze(0)
+                # masks[masks>0.5]=1
+                # masks[masks<0.5]=0
                 loss = dice_loss(organ, seg)
                 loss_summary.append(loss.detach().cpu().numpy())
                 logger.info(
@@ -559,6 +598,21 @@ def save_video(image, label, frames_dir, epoch_num):
         writer.append_data(imageio.imread(frame_file))
     writer.close()
 
+class FlattenedDataset(Dataset):
+    def __init__(self, original_dataset, num_samples):
+        self.original_dataset = original_dataset
+        self.single_length = len(original_dataset)
+        self.total_length = self.single_length * num_samples  # Assuming each item has 4 elements
+        self.num_samples = num_samples
+
+    def __len__(self):
+        return self.total_length
+
+    def __getitem__(self, idx):
+        original_idx = idx // self.num_samples  # Determine which sample in the original dataset
+        sub_idx = idx % self.num_samples  # Determine which element of the sample
+        return self.original_dataset[original_idx][sub_idx]
+    
 if __name__ == '__main__':
     args = get_args_parser()
     args = args.parse_args()

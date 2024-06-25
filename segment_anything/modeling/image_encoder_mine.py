@@ -408,8 +408,8 @@ class PatchEmbed(nn.Module):
             xz[:,:,:,j,:] = self.proj(x[:,:,:,j,:])
             yz[:,:,j,:,:] = self.proj(x[:,:,j,:,:])
         xy = xy.reshape(B,self.embed_dim,H // self.patch_size,W // self.patch_size,Z // self.patch_size,self.patch_size)
-        xz = xz.permute(0,1,2,4,3).reshape(B,self.embed_dim,H // self.patch_size,Z // self.patch_size,W // self.patch_size,self.patch_size).permute(0,1,2,4,3,5)
-        yz = yz.permute(0,1,3,4,2).reshape(B,self.embed_dim,W // self.patch_size,Z // self.patch_size,H // self.patch_size,self.patch_size).permute(0,1,4,2,3,5) # (B,C,H,W,Z,patchsize)
+        xz = xz.permute(0,1,2,4,3).reshape(B,self.embed_dim,H // self.patch_size, W // self.patch_size, self.patch_size, Z // self.patch_size).permute(0,1,2,3,5,4)
+        yz = yz.permute(0,1,3,4,2).reshape(B,self.embed_dim,H // self.patch_size, self.patch_size, W // self.patch_size, Z // self.patch_size).permute(0,1,2,4,5,3) # (B,C,H,W,Z,patchsize)
 
         # x = torch.cat((xy,xz,yz),dim=-1).to(x.device)
         # print("before attention:",x.shape)

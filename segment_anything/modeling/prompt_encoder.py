@@ -93,6 +93,15 @@ class PromptEncoder(nn.Module):
         point_embedding[labels == 1] += self.point_embeddings[1].weight
         return point_embedding
 
+    def _embed_boxes(self, boxes: torch.Tensor) -> torch.Tensor:
+        """Embeds box prompts."""
+        boxes = boxes + 0.5  # Shift to center of pixel
+        coords = boxes.reshape(-1, 2, 3)
+        corner_embedding = self.pe_layer.forward_with_coords(coords, self.input_image_size)
+        corner_embedding[:, 0, :] += self.point_embeddings[2].weight
+        corner_embedding[:, 1, :] += self.point_embeddings[3].weight
+        return corner_embedding
+
     def _get_batch_size(
         self,
         points: Optional[Tuple[torch.Tensor, torch.Tensor]],
@@ -139,9 +148,13 @@ class PromptEncoder(nn.Module):
         """
         bs = self._get_batch_size(points, boxes, masks)
         sparse_embeddings = torch.empty((bs, 0, self.embed_dim), device=self._get_device())
-        coords, labels = points
-        point_embeddings = self._embed_points(coords, labels, pad=(boxes is None))
-        sparse_embeddings = torch.cat([sparse_embeddings, point_embeddings], dim=1)
+        if points is not None:
+            coords, labels = points
+            point_embeddings = self._embed_points(coords, labels, pad=(boxes is None))
+            sparse_embeddings = torch.cat([sparse_embeddings, point_embeddings], dim=1)
+        if boxes is not None:
+            box_embeddings = self._embed_boxes(boxes)
+            sparse_embeddings = torch.cat([sparse_embeddings, box_embeddings], dim=1)
 
         dense_embeddings = self.no_mask_embed.weight.reshape(1, -1, 1, 1, 1).expand(
             bs, -1, self.image_embedding_size[0], self.image_embedding_size[1], self.image_embedding_size[2]
