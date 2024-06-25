@@ -1,6 +1,6 @@
 use by:
 ```
-python train_mine.py --data_path ./amos22 --snapshot_path ./log --checkpoint ../segment-anything-main/sam_vit_b_01ec64.pth --lr 1e-4 --rand_crop_size 128 --batch_size 1 --save_pic_dir organ5 --num_points 4 --organ_id 3
+python train_mine.py --data_path ../../../data/xinglujing/data/nnFormer_raw/Dataset500_amos/ --snapshot_path ./organs_log --checkpoint ./sam_vit_b_01ec64.pth --lr 1e-4 --rand_crop_size 128 --batch_size 1 --save_pic_dir organ3 --num_points 4 --organ_id 3
 ```
 checkpoint is where to load vit_b's path from
 organ_id is to set which organ to train on
